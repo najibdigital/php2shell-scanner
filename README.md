@@ -10,7 +10,7 @@ affected, including sites running WordPress, Joomla, Drupal, Magento,
 Laravel, and custom PHP applications.
 
 🌐 **Try it live (nothing to install):**
-https://php2shell-scanner-khanofjandoolgmailcoms-projects.vercel.app
+https://php2shell-scanner.vercel.app
 
 ---
 
@@ -75,7 +75,7 @@ This scanner answers the question **without exploit traffic**:
 
 Open the live scanner, enter your site's URL, and read the verdict:
 
-👉 https://php2shell-scanner-khanofjandoolgmailcoms-projects.vercel.app
+👉 https://php2shell-scanner.vercel.app
 
 Tick *"This is my website"* if you also want the optional benign
 upload-progress probe. Private and internal addresses are refused by design.
