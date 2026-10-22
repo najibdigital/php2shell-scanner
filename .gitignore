@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.vercel/
+node_modules/
+.DS_Store
+results.json
+*.muse-github-snapshot-sync.json

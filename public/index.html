@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>php2shell Scanner — CVE-2026-109618 / 109619</title>
+<meta name="description" content="Free, safe checker: is your PHP site vulnerable to php2shell (CVE-2026-109618 / CVE-2026-109619, CVSS 9.2 pre-auth RCE)? Passive version check + optional benign probe. No exploit traffic.">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b1220;color:#e6edf3;margin:0}
+.wrap{max-width:760px;margin:0 auto;padding:32px 20px 60px}
+h1{font-size:30px;margin:0 0 6px}.sub{color:#9fb0c3;line-height:1.55}
+.card{background:#111a2e;border:1px solid #22314d;border-radius:14px;padding:20px;margin-top:20px}
+input[type=url]{width:100%;box-sizing:border-box;padding:13px 14px;border-radius:10px;border:1px solid #33456b;background:#0b1220;color:#fff;font-size:16px}
+label.check{display:flex;gap:10px;align-items:flex-start;margin:14px 0;color:#c6d3e4;font-size:14px;line-height:1.45}
+button{width:100%;padding:14px;border:0;border-radius:10px;background:#e8590c;color:#fff;font-size:16px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.55}
+.badge{display:inline-block;padding:5px 12px;border-radius:999px;font-weight:800;letter-spacing:.4px}
+.VULNERABLE,.VULNERABLE_EOL{background:#b42318;color:#fff}.PATCHED{background:#067647;color:#fff}
+.INCONCLUSIVE,.UNREACHABLE{background:#b54708;color:#fff}
+pre,code{background:#0b1220;border-radius:8px}pre{padding:14px;overflow:auto;font-size:13px;line-height:1.5}
+.small{font-size:13px;color:#9fb0c3;line-height:1.55}.err{color:#ff9c8a}
+ul{line-height:1.6;color:#d6e0ee} a{color:#7ab8ff}
+</style></head><body><div class="wrap">
+<h1>php2shell Scanner</h1>
+<p class="sub"><strong>CVE-2026-109618 &amp; CVE-2026-109619 — CVSS 9.2, pre-auth RCE in PHP itself.</strong><br>
+Patched in PHP <strong>8.2.35 / 8.3.36 / 8.4.27 / 8.5.12</strong> on 21 Oct 2026. Every older PHP serving web requests is affected — WordPress, Joomla, Drupal, Laravel, Magento and custom PHP alike. This checker is <em>passive + benign only</em>: it sends no exploit, no code, and nothing that can crash your server.</p>
+
+<div class="card">
+<form id="f">
+<input type="url" id="url" placeholder="https://your-website.com" required>
+<label class="check"><input type="checkbox" id="own"> <span>This is my website (or I'm authorised to test it) — required for the active probe.</span></label>
+<label class="check"><input type="checkbox" id="probe"> <span>Also run the benign <code>upload_progress</code> probe — one tiny, harmless multipart POST (plain-text canary, no code) to see if the attack surface is reachable or WAF-blocked.</span></label>
+<button id="btn">Scan my site</button>
+</form>
+<div id="out"></div>
+</div>
+
+<div class="card small">
+<strong style="color:#fff">How to read the result</strong>
+<ul>
+<li><strong>VULNERABLE</strong> — a PHP version below the fixed release was detected. Patch + restart PHP workers today.</li>
+<li><strong>PATCHED</strong> — detected version is at/above the fix. Distro backports can hide this — confirm the changelog names both CVEs.</li>
+<li><strong>INCONCLUSIVE</strong> — no version leaked (common, and good hygiene). It does <em>not</em> mean safe. Check on the server: <code>php -v</code></li>
+</ul>
+<p>Only scan sites you own or are authorised to test. Private/internal addresses are refused. Full source (CLI + this web app) is open — audit it before you trust it.</p>
+<p>Official advisories: GHSA-w8hw-w9fx-j79w (CVE-2026-109618) and GHSA-6wmf-4rv5-p3rp (CVE-2026-109619) from the PHP security team. The only complete fix is updating PHP — there is no complete workaround.</p>
+</div>
+</div>
+<script>
+const f=document.getElementById('f'),out=document.getElementById('out'),btn=document.getElementById('btn');
+f.addEventListener('submit',async e=>{e.preventDefault();btn.disabled=true;btn.textContent='Scanning…';out.innerHTML='';
+try{
+ const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:document.getElementById('url').value,ownSite:document.getElementById('own').checked,activeProbe:document.getElementById('probe').checked})});
+ const d=await r.json();
+ if(d.error){out.innerHTML=`<p class="err">${d.error}</p>`;return;}
+ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+ out.innerHTML=`<p style="margin-top:18px"><span class="badge ${d.verdict}">${esc(d.verdict)}</span></p>
+ <p><strong>PHP detected:</strong> ${esc(d.php_version||'not exposed')}${d.sources&&d.sources.length?` <span class="small">(via ${esc(d.sources.join(', '))})</span>`:''}</p>
+ <p>${esc(d.detail)}</p>
+ ${d.evidence&&d.evidence.length?`<p class="small">Evidence: ${d.evidence.map(esc).join(' · ')}</p>`:''}
+ ${d.probe&&d.probe.ran?`<p class="small">Benign probe: <strong>${esc(d.probe.result)}</strong> (HTTP ${esc(d.probe.status??'—')}) — ${esc(d.probe.detail)}</p>`:''}
+ <strong>Fix</strong><ul>${(d.remediation||[]).map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`;
+}catch(err){out.innerHTML=`<p class="err">Scan failed: ${err.message}</p>`;}
+finally{btn.disabled=false;btn.textContent='Scan my site';}});
+</script></body></html>
