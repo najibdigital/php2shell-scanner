@@ -41,6 +41,72 @@ This scanner answers the question **without exploit traffic**:
 | **Session usage** | Notes whether the site sets a `PHPSESSID` cookie | No |
 | **Platform hints** | Detects WordPress / Joomla / Drupal / Magento signals, which raise impact | No |
 | **Upload-progress reachability** *(optional, off by default)* | One small `multipart/form-data` POST with a plain-text random canary in the `PHP_SESSION_UPLOAD_PROGRESS` field — **no PHP code, no serialized objects, no oversized headers or bodies** — and reports the HTTP status | Minimal — one benign POST, own sites only |
+| **CVE-2026-115560 exposure** *(related advisory)* | If a phpinfo page is exposed, reads the session settings phpinfo itself prints (`session.serialize_handler`, `session.upload_progress.enabled`, `session.upload_progress.name`) and reports which of that CVE's preconditions are externally visible | No — reuses the phpinfo GET above |
+
+## Related: CVE-2026-115560 (informational advisory, unpatched)
+
+On **23 October 2026** the PHP project published an informational advisory
+for a third issue in the same session upload-progress feature:
+**CVE-2026-115560**. Key facts, straight from that advisory:
+
+- **No patch exists yet.** PHP is handling it in the regular release cycle
+  and will publish the full advisory with the next regular bugfix release.
+  It affects **even the php2shell-patched releases** (8.2.35 / 8.3.36 /
+  8.4.27 / 8.5.12) — a `PATCHED` verdict above does *not* clear it.
+- **It needs an unusual combination — all three at once:**
+  1. `session.serialize_handler` is set to `php_binary` or `php_serialize`
+     in the **server configuration** (the default is `php`);
+  2. the application **switches it to `php` at runtime** with `ini_set()`
+     before calling `session_start()`;
+  3. **session upload progress is still enabled** (it is on by default).
+- **PHP's suggested protection** until the fix ships:
+  `session.upload_progress.enabled=0`. If you already set that as a
+  php2shell mitigation on 21 Oct, PHP says keep it in place and no further
+  action is needed. Applications that never change the serialize handler
+  at runtime may keep the feature enabled.
+- Because precondition 2 is **application code**, no external scanner can
+  confirm or rule out this CVE completely. This scanner reports exactly
+  what is externally visible and labels the rest as an owner-side check:
+
+| Status | Meaning |
+|---|---|
+| `CONFIG_PRECONDITIONS_PRESENT` | phpinfo confirms preconditions 1 + 3. Audit your code for precondition 2; until it clears, treat as at risk and disable upload progress. (CLI exit code is also `2` in this case.) |
+| `PRECONDITIONS_NOT_PRESENT_EXTERNALLY` | phpinfo shows the default `php` handler, so precondition 1 is not met. |
+| `MITIGATED` | phpinfo shows `session.upload_progress.enabled = Off` — PHP's suggested mitigation is in place. |
+| `POSSIBLE_UNVERIFIED` / `UNKNOWN` | The needed values could not be read externally. Check on the server: `php -i \| grep -E 'serialize_handler\|upload_progress'` |
+
+## How Cloudflare's WAF detects php2shell — and its limits
+
+Cloudflare deployed managed WAF rules for php2shell about **9 hours ahead
+of public disclosure** (21 Oct 2026, from 03:02 UTC), free plans included:
+
+- **Seven request rules** ("PHP Remote Code Execution Attack
+  (CVE-2026-109618, CVE-2026-109619)" plus #2–#7) in both the free and
+  managed rulesets, matching exploit-shaped multipart traffic — the
+  upload-progress field, session handling, and code-bearing payload
+  patterns — in the request.
+- **Full transaction detection** (new with this incident): some payloads
+  can't be judged from the request alone, so Cloudflare also inspects the
+  **origin's response in the same transaction** and can block that
+  response before it reaches the requester. Detection is request *and*
+  response, not a simple keyword filter.
+- **The default-name assumption.** In its 23 Oct update Cloudflare states
+  customers are protected against CVE-2026-115560 by the existing rule #6
+  **if the site uses PHP's default upload-progress field name**
+  (`PHP_SESSION_UPLOAD_PROGRESS`). Sites that changed
+  `session.upload_progress.name` are **not** covered by that default
+  protection — which is why this scanner reports the configured name when
+  phpinfo exposes it.
+- **Rules keep changing.** Cloudflare's 30 Oct CTF update says real
+  research submissions were used to harden these rules and add new
+  detections. A probe blocked today is evidence about today's ruleset,
+  not a permanent property of your site.
+
+**The limit, in Cloudflare's own framing:** a WAF is defence-in-depth, not
+a substitute for patching. Response blocking can stop data reaching an
+attacker; it cannot undo code that already executed at the origin. Patch
+PHP, restart the workers, and treat WAF rules as the interim layer they
+are.
 
 ## Verdicts
 
@@ -152,7 +218,10 @@ Patching is the **only** complete fix. In order:
 **Interim mitigations (they reduce risk; they are *not* fixes):**
 
 - Set `session.upload_progress.enabled = Off` in `php.ini` if your
-  application does not use upload progress bars, then reload PHP.
+  application does not use upload progress bars, then reload PHP. (This is
+  also PHP's suggested protection for the unpatched CVE-2026-115560 until
+  its fix ships in the next regular release — see the dedicated section
+  above.)
 - Block `PHP_SESSION_UPLOAD_PROGRESS` in multipart POST bodies at your
   WAF/CDN. This field has near-zero legitimate use. Example ModSecurity
   rule:
@@ -199,8 +268,10 @@ defensively:
   (see the caveat above).
 - A **WAF-blocked probe** means one attack path is filtered today; WAF
   rules change and bypasses happen. Patch anyway.
-- This tool checks for **these two CVEs only**. A `PATCHED` verdict is not
-  a general security audit of your site.
+- This tool checks for **these two CVEs**, plus the configuration exposure
+  for the related CVE-2026-115560 described above. A `PATCHED` verdict is
+  not a general security audit of your site, and it does not clear
+  CVE-2026-115560 (which is unpatched — see its section).
 
 ## Project structure
 
@@ -211,6 +282,8 @@ php2shell-scanner/
 │   └── scan.js         # Web scanner API (Vercel serverless, Node 18+)
 ├── public/
 │   └── index.html      # Web UI (no build step, no dependencies)
+├── tests/
+│   └── test_cve_2026_115560.py  # Unit tests for the 115560 assessment
 ├── vercel.json         # Deployment config
 ├── README.md
 ├── SECURITY.md         # Responsible disclosure for this project
@@ -232,6 +305,14 @@ checks, or denial-of-service techniques will be closed.
 - CVE-2026-109619 — PHP security advisory GHSA-6wmf-4rv5-p3rp
 - Fixed releases: PHP 8.2.35, 8.3.36, 8.4.27, 8.5.12 (21 October 2026),
   announced by the PHP security team at [php.net](https://www.php.net)
+- CVE-2026-115560 — PHP informational advisory, "Session upload progress"
+  (23 October 2026, [php.net news archive](https://www.php.net/archive/2026.php#2026-10-23-1));
+  full advisory promised with the next regular release
+- Cloudflare — "Cloudflare deploys protections against php2shell
+  vulnerability" (rule list, full transaction detection, and the 23 Oct
+  update covering CVE-2026-115560 and the default field-name condition),
+  and "Introducing the Cloudflare PHP Capture the Flag challenge"
+  (30 Oct update on rule hardening)
 
 ## Legal & responsible use
 
