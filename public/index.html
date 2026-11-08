@@ -21,6 +21,7 @@ ul{line-height:1.6;color:#d6e0ee} a{color:#7ab8ff}
 <h1>php2shell Scanner</h1>
 <p class="sub"><strong>CVE-2026-109618 &amp; CVE-2026-109619 — CVSS 9.2, pre-auth RCE in PHP itself.</strong><br>
 Patched in PHP <strong>8.2.35 / 8.3.36 / 8.4.27 / 8.5.12</strong> on 21 Oct 2026. Every older PHP serving web requests is affected — WordPress, Joomla, Drupal, Laravel, Magento and custom PHP alike. This checker is <em>passive + benign only</em>: it sends no exploit, no code, and nothing that can crash your server.</p>
+<p class="sub"><strong>Related advisory — CVE-2026-115560 (23 Oct 2026):</strong> a third, configuration-dependent issue in the same session upload-progress feature. It is <em>unpatched</em> (fix in PHP's next regular release) and affects even the patched versions above — but only when a rare combination lines up (see below). If your site exposes phpinfo, this scanner reads the session settings phpinfo prints and reports which preconditions are visible. PHP's suggested protection until the fix ships: <code>session.upload_progress.enabled = 0</code>.</p>
 
 <div class="card">
 <form id="f">
@@ -38,6 +39,7 @@ Patched in PHP <strong>8.2.35 / 8.3.36 / 8.4.27 / 8.5.12</strong> on 21 Oct 2026
 <li><strong>VULNERABLE</strong> — a PHP version below the fixed release was detected. Patch + restart PHP workers today.</li>
 <li><strong>PATCHED</strong> — detected version is at/above the fix. Distro backports can hide this — confirm the changelog names both CVEs.</li>
 <li><strong>INCONCLUSIVE</strong> — no version leaked (common, and good hygiene). It does <em>not</em> mean safe. Check on the server: <code>php -v</code></li>
+<li><strong>CVE-2026-115560</strong> is reported separately under the badge — a <strong>PATCHED</strong> verdict for php2shell does <em>not</em> clear it, because no patch exists yet. It needs a rare combination: <code>session.serialize_handler</code> set to <code>php_binary</code>/<code>php_serialize</code> in server config, app code switching it to <code>php</code> via <code>ini_set()</code> before <code>session_start()</code>, and session upload progress still enabled. The middle one lives in your code and cannot be checked from outside — the scanner says so rather than guessing.</li>
 </ul>
 <p>Only scan sites you own or are authorised to test. Private/internal addresses are refused. Full source (CLI + this web app) is open — audit it before you trust it.</p>
 <p>Official advisories: GHSA-w8hw-w9fx-j79w (CVE-2026-109618) and GHSA-6wmf-4rv5-p3rp (CVE-2026-109619) from the PHP security team. The only complete fix is updating PHP — there is no complete workaround.</p>
@@ -56,6 +58,7 @@ try{
  <p>${esc(d.detail)}</p>
  ${d.evidence&&d.evidence.length?`<p class="small">Evidence: ${d.evidence.map(esc).join(' · ')}</p>`:''}
  ${d.probe&&d.probe.ran?`<p class="small">Benign probe: <strong>${esc(d.probe.result)}</strong> (HTTP ${esc(d.probe.status??'—')}) — ${esc(d.probe.detail)}</p>`:''}
+ ${d.cve_2026_115560?`<p class="small"><strong>CVE-2026-115560 (related, unpatched): ${esc(d.cve_2026_115560.status)}</strong> — ${esc(d.cve_2026_115560.detail)}${d.cve_2026_115560.waf_name_note?`<br>WAF note: ${esc(d.cve_2026_115560.waf_name_note)}`:''}</p>`:''}
  <strong>Fix</strong><ul>${(d.remediation||[]).map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`;
 }catch(err){out.innerHTML=`<p class="err">Scan failed: ${err.message}</p>`;}
 finally{btn.disabled=false;btn.textContent='Scan my site';}});
