@@ -1,6 +1,9 @@
 // php2shell web scanner API — Vercel serverless function (Node 18+)
 // Safe by design: passive fingerprinting + ONE benign probe (only when the
 // caller ticks the own-site attestation). No exploit payloads, no OOM, no RCE.
+// Also assesses the related CVE-2026-115560 advisory from configuration a
+// phpinfo page itself exposes — the runtime precondition is application
+// code and is reported as not externally observable, never guessed.
 // SSRF guard: public http(s) only, DNS resolved and checked against
 // private / loopback / link-local / reserved ranges on every redirect hop.
 const dns = require("dns").promises;
@@ -50,6 +53,44 @@ function verdictFor(ver) {
   if (ver[0] > 8 || (ver[0]===8 && ver[1] > 5)) return ["PATCHED", `PHP ${vs} is newer than the last affected branch (8.5).`];
   return ["VULNERABLE_EOL", `PHP ${vs} is in the affected range (reported from 5.4) with NO official fixed release for this branch. Upgrade to a fixed 8.2/8.3/8.4/8.5 build or a vendor LTS build containing both fixes.`];
 }
+function parsePhpinfoConfig(body) {
+  if (!body) return {};
+  const text = String(body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const cfg = {}; let m;
+  if ((m = text.match(/session\.upload_progress\.enabled\s+([A-Za-z0-9]+)/))) cfg.upload_progress_enabled = m[1];
+  if ((m = text.match(/session\.serialize_handler\s+([A-Za-z_]+)/))) cfg.serialize_handler = m[1];
+  if ((m = text.match(/session\.upload_progress\.name\s+([^\s]+)/))) cfg.upload_progress_name = m[1];
+  return cfg;
+}
+function assess115560(cfg, phpinfoLeaked) {
+  // PHP advisory 23 Oct 2026 — ALL preconditions must hold: (a) serialize_handler
+  // = php_binary/php_serialize in server config, (b) app switches it to 'php'
+  // via ini_set() before session_start() (application code — never observable
+  // externally), (c) session.upload_progress enabled. No patch yet; PHP suggests
+  // session.upload_progress.enabled=0 until the next regular release.
+  const isOn = v => ["on","1","true","yes"].includes(String(v).trim().toLowerCase());
+  const pre = { config_serialize_handler_nondefault: null, runtime_ini_set_switch: null, upload_progress_enabled: null };
+  let wafNote = null;
+  if (cfg && cfg.serialize_handler) pre.config_serialize_handler_nondefault = ["php_binary","php_serialize"].includes(cfg.serialize_handler.toLowerCase());
+  if (cfg && cfg.upload_progress_enabled !== undefined) pre.upload_progress_enabled = isOn(cfg.upload_progress_enabled);
+  if (cfg && cfg.upload_progress_name) {
+    wafNote = cfg.upload_progress_name === "PHP_SESSION_UPLOAD_PROGRESS"
+      ? "Uses the DEFAULT upload-progress field name — Cloudflare's default php2shell WAF rules cover this field name (their rule #6 also covers CVE-2026-115560). A WAF is an interim layer, not a fix."
+      : `Uses a CUSTOM upload-progress field name (${cfg.upload_progress_name}) — Cloudflare states its default php2shell WAF coverage assumes the default field name, so sites that changed session.upload_progress.name are NOT covered by it.`;
+  }
+  const base = { cve: "CVE-2026-115560", config_seen: cfg || {}, preconditions: pre, waf_name_note: wafNote };
+  if (pre.upload_progress_enabled === false)
+    return { ...base, status: "MITIGATED", detail: "phpinfo shows session.upload_progress.enabled = Off — PHP's suggested mitigation for CVE-2026-115560 is in place. Keep it off until PHP's next regular release ships the fix." };
+  if (pre.config_serialize_handler_nondefault && pre.upload_progress_enabled)
+    return { ...base, status: "CONFIG_PRECONDITIONS_PRESENT", detail: "phpinfo confirms 2 of the 3 CVE-2026-115560 preconditions: session.serialize_handler is php_binary/php_serialize in server config AND session.upload_progress is enabled. The third — app code switching the handler to 'php' via ini_set() before session_start() — cannot be seen from outside: audit your code for it. Until that audit clears you, treat this as AT RISK and set session.upload_progress.enabled = 0 — this CVE affects even PHP versions patched for php2shell." };
+  if (pre.upload_progress_enabled && pre.config_serialize_handler_nondefault === false)
+    return { ...base, status: "PRECONDITIONS_NOT_PRESENT_EXTERNALLY", detail: "phpinfo shows session.upload_progress enabled but session.serialize_handler is the default 'php', so the configuration precondition for CVE-2026-115560 is NOT met. The runtime precondition is application code and cannot be verified from outside." };
+  if (pre.upload_progress_enabled)
+    return { ...base, status: "POSSIBLE_UNVERIFIED", detail: "phpinfo shows session.upload_progress enabled, but the serialize_handler value could not be read, so the CVE-2026-115560 preconditions cannot be confirmed or ruled out externally. Check on the server: php -i | grep -E 'serialize_handler|upload_progress'." };
+  if (phpinfoLeaked)
+    return { ...base, status: "UNKNOWN", detail: "A phpinfo page is exposed but the session directives could not be read from it, so CVE-2026-115560 exposure cannot be determined externally. Check on the server: php -i | grep -E 'serialize_handler|upload_progress'." };
+  return { ...base, status: "UNKNOWN", detail: "CVE-2026-115560 exposure cannot be determined from outside — no configuration is exposed (good hygiene). Owner-side check: php -i | grep -E 'serialize_handler|upload_progress', plus a code search for ini_set() switching session.serialize_handler before session_start(). PHP suggests session.upload_progress.enabled = 0 until the next regular release ships the fix." };
+}
 async function fetchSafe(url, opts={}, hops=0) {
   if (hops > 4) throw new Error("Too many redirects");
   const u = new URL(url);
@@ -88,7 +129,7 @@ module.exports = async (req, res) => {
       if (k.toLowerCase()==="x-powered-by" && /php/i.test(v)) evidence.push(`${k}: ${v}`);
     }
     if (!version) { const ver = parseVersion(main.body); if (ver) { version = ver; sources.push("page body"); } }
-    const leaks = [];
+    const leaks = []; let phpinfoCfg = {};
     await Promise.all(PHPINFO_PATHS.map(async (p) => {
       try {
         const r = await fetchSafe(`${u.protocol}//${u.host}${p}`);
@@ -98,10 +139,14 @@ module.exports = async (req, res) => {
         if (r.status===200 && samePath && hits>=3) {
           leaks.push(p);
           const ver = parseVersion(r.body); if (ver && !version) { version = ver; sources.push(`phpinfo page ${p}`); }
+          const cfg = parsePhpinfoConfig(r.body); if (Object.keys(cfg).length && !Object.keys(phpinfoCfg).length) phpinfoCfg = cfg;
         }
       } catch {}
     }));
     if (leaks.length) evidence.push(`phpinfo exposed at ${leaks.join(", ")} — remove it, it leaks full server config`);
+    if (Object.keys(phpinfoCfg).length) evidence.push("phpinfo session config: " + Object.entries(phpinfoCfg).map(([k,v])=>`${k}=${v}`).join(", "));
+    const cve115560 = assess115560(phpinfoCfg, leaks.length > 0);
+    if (cve115560.status === "CONFIG_PRECONDITIONS_PRESENT") evidence.push("CVE-2026-115560: configuration preconditions present — this CVE is unpatched and affects even php2shell-patched PHP");
     const cms = [];
     const b = (main.body||"").toLowerCase();
     if (b.includes("wp-content")||b.includes("wordpress")) cms.push("WordPress");
@@ -126,9 +171,11 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       target, verdict, detail, php_version: version ? version.join(".") : null, sources,
       http_status: main.status, evidence, cms, phpinfo_leak: leaks, probe,
-      cves: ["CVE-2026-109618","CVE-2026-109619"],
+      cves: ["CVE-2026-109618","CVE-2026-109619","CVE-2026-115560"],
+      cve_2026_115560: cve115560,
       remediation: [
         "Update PHP to 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12+, then restart PHP-FPM / Apache / LiteSpeed workers.",
+        "CVE-2026-115560 (related, no patch yet — it affects even the patched versions above): set session.upload_progress.enabled = 0/Off in php.ini and reload PHP until PHP's next regular release ships the fix (PHP advisory, 23 Oct 2026). Most urgent if session.serialize_handler is php_binary or php_serialize in server config.",
         "Interim: session.upload_progress.enabled = Off in php.ini (if unused), and reload PHP.",
         "Interim: block PHP_SESSION_UPLOAD_PROGRESS in multipart POSTs at WAF/CDN (e.g. a ModSecurity rule denying multipart POST bodies containing that field).",
         "Remove public phpinfo pages; set expose_php = Off (reduces fingerprinting, not a fix).",
@@ -136,6 +183,6 @@ module.exports = async (req, res) => {
       ]
     });
   } catch(e) {
-    return res.status(200).json({ target, verdict: "UNREACHABLE", detail: String(e.message||e), php_version: null, evidence: [], cms: [], probe: { ran:false }, remediation: [] });
+    return res.status(200).json({ target, verdict: "UNREACHABLE", detail: String(e.message||e), php_version: null, evidence: [], cms: [], probe: { ran:false }, cve_2026_115560: assess115560({}, false), remediation: [] });
   }
 };
